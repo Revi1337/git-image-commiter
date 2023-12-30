@@ -10,10 +10,11 @@ import sys
 from urllib.parse import unquote, quote
 
 """
-v5. multi image commit
+v6. multi image commit
     replace image-local-path to git-uploaded-link in markdown 
     remove collect_image func
     remove REGEX PATTERN 2, 3
+    add markdown relative path arguments 
 """
 
 HEADERS = {}
@@ -147,15 +148,18 @@ def extract_image_from_markdown(markdown_file_path) -> dict[str, str]:
                 if len(line) > len(line[st_inx : end_idx]):
                     continue
                 url_links = re.findall(PATTERN_1, line)
+                if url_links[-1].startswith('https://') or url_links[-1].startswith('http://'):
+                    continue
                 wiki_link_list[line_number] = os.path.basename(url_links[-1])
     return wiki_link_list
 
 
 
-def parse_file_metadata(markdown_file_path, images_folder_name):
+def parse_file_metadata(markdown_file_path, images_folder_name, git_upload_path):
     file_path, markdown_file = os.path.split(markdown_file_path)
     image_path = os.path.join(file_path, images_folder_name)
-    return os.path.basename(file_path), markdown_file, image_path
+    git_path = os.path.dirname(git_upload_path).replace("\\", '/')
+    return git_path, markdown_file, image_path
 
 
 
@@ -185,8 +189,9 @@ def parse_arguments():
     parser.add_argument('--repo', required=True, help='github repo expected to be uploaded')
     parser.add_argument('--token', required=True, help='github token required to upload')
     parser.add_argument('--branch', required=True, help='github repo branch expected to be uploaded')
-    parser.add_argument('--upload', required=True, nargs=2, metavar=('markdown_path', 'iamge_folder_name'),
-                        help='markdown_path and iamge_folder_name')
+    parser.add_argument('--upload', required=True, nargs=2, metavar=('markdown_abs_path', 'image_folder_name'),
+                        help='specify markdown absolute path and name of the folder containing the images')
+    parser.add_argument('--gitpath', required=True, help='specify the path to the github repository where the image will be saved.')
     return parser.parse_args().__dict__
 
 
@@ -215,7 +220,6 @@ def replace_address_in_markdown(markdown_file_path, markdown_line_imagelink_keyp
                     changed_link = markdown_contents[line].replace(pattern_link, local_remote_keypair[pure_link])
                 else:
                     raise RuntimeError("error occured while replacing links in markdown")
-
             file.writelines(changed_link)
 
 
@@ -226,7 +230,7 @@ def main():
 
     # parse markdown file to extract metatdata information of images that need to be uploaded and commited to github
     markdown_file_path, images_folder_name = arguments['upload']
-    git_path, markdown_file, image_path = parse_file_metadata(markdown_file_path, images_folder_name)
+    git_path, markdown_file, image_path = parse_file_metadata(markdown_file_path, images_folder_name, arguments['gitpath'])
     markdown_line_imagelink_keypair = extract_image_from_markdown(markdown_file_path)
     image_abspaths_for_upload = process_needto_upload(image_path, markdown_line_imagelink_keypair)
 
