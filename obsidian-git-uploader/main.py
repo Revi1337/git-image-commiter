@@ -1,114 +1,211 @@
-"""
-@Author Revi1337
-
-Reference
-
-- https://siddharthav.medium.com/push-multiple-files-under-a-single-commit-through-github-api-f1a5b0b283ae
-- https://docs.github.com/ko/rest/git/trees?apiVersion=2022-11-28#about-git-trees
-- https://gist.github.com/quilicicf/41e241768ab8eeec1529869777e996f0
-- 파일 모드 : 100644파일(blob), 100755실행 파일(blob), 040000하위 디렉터리(트리), 160000하위 모듈(커밋) 또는 120000심볼릭 링크의 경로를 지정하는 blob 중 하나 입니다.
-
-"""
-
-import json
-import time
-import aiohttp
 import asyncio
+import aiohttp
+import json
+import requests
+import argparse
+import re
+import os
+import base64
+from urllib.parse import unquote
 
 
-HEADERS = {
-    'Authorization': 'Bearer {YOUR TOKEN}',
-    'Accept': 'application/vnd.github+json'
-}
+"""
+v2. multi image commit
+"""
 
 
-CREATE_BLOB_URL = f'https://api.github.com/repos/Revi1337/BlogImageFactory/git/blobs'               # post, body, token
-GET_TREE_URL = f'https://api.github.com/repos/Revi1337/BlogImageFactory/git/trees/main'             # get
-CREATE_TREE_URL = f'https://api.github.com/repos/Revi1337/BlogImageFactory/git/trees'               # post, body, token
-GET_BRANCH_LAST_REF = f'https://api.github.com/repos/Revi1337/BlogImageFactory/git/refs/heads/main' # get
-COMMIT_URL = f'https://api.github.com/repos/Revi1337/BlogImageFactory/git/commits'                  # post, body, token
-UPDATE_REF_URL = f'https://api.github.com/repos/Revi1337/BlogImageFactory/git/refs/heads/main'      # patch, body, token
+HEADERS = {}
+
+CREATE_BLOB_URL = 'https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPOSITORY}/git/blobs'                            # post, body, token
+GET_TREE_URL = 'https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPOSITORY}/git/trees/{GITHUB_BRANCH}'               # get
+CREATE_TREE_URL = 'https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPOSITORY}/git/trees'                            # post, body, token
+GET_BRANCH_LAST_REF = 'https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPOSITORY}/git/refs/heads/{GITHUB_BRANCH}'   # get
+COMMIT_URL = 'https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPOSITORY}/git/commits'                               # post, body, token
+UPDATE_REF_URL = 'https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPOSITORY}/git/refs/heads/{GITHUB_BRANCH}'        # patch, body, token
+
+
+PATTERN_1 = r"!\[.{0,}\]\((.*?)\)"
+PATTERN_2 = r"!\[\[(.*?)\]\]"
+
+
+def do_dispatch(image_abspaths_for_upload, markdown_line_imagelink_keypair, git_path):
+    with requests.Session() as sess:
+        asyncio.run(create_blob(sess, image_abspaths_for_upload, git_path))
 
 
 
-async def update_ref(sess, commited_sha):
-    body = { 'sha': f'{commited_sha}' }
-    async with sess.patch(url=UPDATE_REF_URL, data=json.dumps(body), headers=HEADERS) as response:
-        res_json = await response.json()
-        if int(response.status) == 200:
-            print('success commmit')
+async def create_blob(sess, image_abspaths_for_upload, git_path):
+    blob_metadatas = build_blob_request_metadatas(image_abspaths_for_upload)
+    async with aiohttp.ClientSession() as session:
+        blob_responses = await asyncio.gather(
+            *[build_blob(session, blob_keypair) for blob_keypair in blob_metadatas.items()])
+    create_tree(sess, blob_responses, git_path)
 
 
 
-async def do_commit(sess, changed_tree_sha):
-    last_branch_sha = await get_branch_last_ref(sess)
+def build_blob_request_metadatas(image_abspaths_for_upload):
+    metadatas = {}
+    for upload_image in image_abspaths_for_upload:
+        unquoted_image_path = unquote(upload_image)
+        with open(unquoted_image_path, 'rb') as image:
+            body = {
+                'content': base64.b64encode(image.read()).decode("utf8"),
+                'encoding': 'base64'
+            }
+            metadatas[unquoted_image_path] = body
+    return metadatas
+
+
+
+async def build_blob(sess, blob_keypair):
+    upload_image, image_request_body = blob_keypair[0], blob_keypair[1]
+    async with sess.post(url=CREATE_BLOB_URL, data=json.dumps(image_request_body), headers=HEADERS) as response:
+        blob_res = await response.json()
+        return { upload_image : blob_res['sha'] }
+
+
+
+def create_tree(sess, blob_responses, git_path):
+    root_tree_sha_for_basetree = get_root_tree_sha(sess)
+    body = build_tree_request_body(root_tree_sha_for_basetree, blob_responses, git_path)
+    create_tree_response = sess.post(url=CREATE_TREE_URL, data=json.dumps(body), headers=HEADERS).json()
+    changed_tree_sha = create_tree_response['sha']
+    do_commit(sess, changed_tree_sha)
+
+
+
+def get_root_tree_sha(sess):
+    root_tree_response = sess.get(url=GET_TREE_URL, headers=HEADERS).json()
+    return root_tree_response['sha']
+
+
+
+def build_tree_request_body(root_tree_sha_for_basetree, blob_responses, git_path):
+    tree_values = []
+    for blob_metadata in blob_responses:
+        for upload_image, image_sha in blob_metadata.items():
+            tree_values.append(
+                {
+                    'path': f'{git_path}/{os.path.basename(upload_image)}',
+                    'mode': '100644',
+                    'type': 'blob',
+                    'sha': f'{image_sha}'
+                }
+            )
+    return {
+        'base_tree': f'{root_tree_sha_for_basetree}',
+        'tree': tree_values
+    }
+
+
+
+def do_commit(sess, changed_tree_sha):
+    last_branch_sha = get_branch_last_ref(sess)
     body = {
         'tree': f'{changed_tree_sha}',
         'message': 'Commited By Obsidian Git Plugin Made By @Revi1337',
         'parents':  [f'{last_branch_sha}']
     }
-    async with sess.post(url=COMMIT_URL, data=json.dumps(body), headers=HEADERS) as response:
-        commit_response = await response.json()
-        commited_sha = commit_response['sha']
-        await update_ref(sess, commited_sha)
+    commit_response = sess.post(url=COMMIT_URL, data=json.dumps(body), headers=HEADERS).json()
+    commited_sha = commit_response['sha']
+    update_ref(sess, commited_sha)
 
 
 
-async def get_branch_last_ref(sess):
-    async with sess.get(url=GET_BRANCH_LAST_REF) as response:
-        branch_last_ref_response = await response.json()
-        return branch_last_ref_response['object']['sha']
+def update_ref(sess, commited_sha):
+    body = { 'sha': f'{commited_sha}' }
+    response = sess.patch(url=UPDATE_REF_URL, data=json.dumps(body), headers=HEADERS)
+    if int(response.status_code) == 200:
+        print('success commmit')
 
 
 
-async def create_tree(sess, blob_sha, blob_url):
-    root_tree_sha_for_basetree = await get_root_tree_sha(sess)
-    body = {
-        'base_tree': f'{root_tree_sha_for_basetree}',
-        'tree': [
-            {
-                'path': 'zzzzz/dummy.py',
-                'mode': '100644',
-                'type': 'blob',
-                'sha': f'{blob_sha}'
-            }
-        ]
-    }
-    async with sess.post(url=CREATE_TREE_URL, data=json.dumps(body), headers=HEADERS) as response:
-        create_tree_response = await response.json()
-        changed_tree_sha = create_tree_response['sha']
-        await do_commit(sess, changed_tree_sha)
+def get_branch_last_ref(sess):
+    branch_last_ref_response = sess.get(url=GET_BRANCH_LAST_REF).json()
+    return branch_last_ref_response['object']['sha']
 
 
 
-async def get_root_tree_sha(sess):
-    async with sess.get(url=GET_TREE_URL, headers=HEADERS) as response:
-        root_tree_response = await response.json()
-        return root_tree_response['sha']
+def process_needto_upload(image_path, markdown_line_imagelink_keypair):
+    """ filter duplicate imagelink and build pure image links """
+    image_links = set(markdown_line_imagelink_keypair.values())
+    return [os.path.join(image_path, image_link) for image_link in image_links]
 
 
 
-async def create_blob(sess):
-    body = { "content": "print('hello world')", "encoding": "utf-8" }
-    async with sess.post(url=CREATE_BLOB_URL, data=json.dumps(body), headers=HEADERS) as response:
-        create_blob_response = await response.json()
-        blob_sha, blob_url = create_blob_response['sha'], create_blob_response['url']
-        await create_tree(sess, blob_sha, blob_url)
+def extract_image_from_markdown(markdown_file_path) -> dict[str, str]:
+    wiki_link_list = {}
+    with open(markdown_file_path, 'r', encoding='UTF-8') as file:
+        for line_number, line in enumerate(file, 1):
+            if not line:
+                break
+            line = line.strip('\n')
+            match_regex = re.search(PATTERN_1, line) or re.search(PATTERN_2, line)
+            if match_regex is not None:
+                st_inx, end_idx = match_regex.span()
+                if len(line) > len(line[st_inx : end_idx]):
+                    continue
+                url_links = re.findall(PATTERN_1, line) or re.findall(PATTERN_2, line)
+                wiki_link_list[line_number] = url_links[-1]
+    return wiki_link_list
 
 
 
-async def do_dispatch():
-    async with aiohttp.ClientSession() as sess:
-        await create_blob(sess)
+def collect_images(image_path):
+    return [os.path.join(image_path, image_name) for image_name in os.listdir(image_path)]
 
 
 
-async def main():
-    return await do_dispatch()
+def parse_file_metadata(markdown_file_path, images_folder_name):
+    file_path, markdown_file = os.path.split(markdown_file_path)
+    image_path = os.path.join(file_path, images_folder_name)
+    return os.path.basename(file_path), markdown_file, image_path
+
+
+
+def initialize(arguments):
+    global CREATE_BLOB_URL
+    global GET_TREE_URL
+    global CREATE_TREE_URL
+    global GET_BRANCH_LAST_REF
+    global COMMIT_URL
+    global UPDATE_REF_URL
+
+    HEADERS['Authorization'] = f'Bearer {arguments["token"]}'
+    HEADERS['Accept'] = 'application/vnd.github+json'
+
+    CREATE_BLOB_URL = f'https://api.github.com/repos/{arguments["username"]}/{arguments["repo"]}/git/blobs'
+    GET_TREE_URL = f'https://api.github.com/repos/{arguments["username"]}/{arguments["repo"]}/git/trees/{arguments["branch"]}'
+    CREATE_TREE_URL = f'https://api.github.com/repos/{arguments["username"]}/{arguments["repo"]}/git/trees'
+    GET_BRANCH_LAST_REF = f'https://api.github.com/repos/{arguments["username"]}/{arguments["repo"]}/git/refs/heads/{arguments["branch"]}'
+    COMMIT_URL = f'https://api.github.com/repos/{arguments["username"]}/{arguments["repo"]}/git/commits'
+    UPDATE_REF_URL = f'https://api.github.com/repos/{arguments["username"]}/{arguments["repo"]}/git/refs/heads/{arguments["branch"]}'
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--username', required=True, help='github username')
+    parser.add_argument('--repo', required=True, help='github repo expected to be uploaded')
+    parser.add_argument('--token', required=True, help='github token required to upload')
+    parser.add_argument('--branch', required=True, help='github repo branch expected to be uploaded')
+    parser.add_argument('--upload', required=True, nargs=2, metavar=('markdown_path', 'iamge_folder_name'),
+                        help='markdown_path and iamge_folder_name')
+    return parser.parse_args().__dict__
+
+
+
+def main():
+    arguments = parse_arguments()
+    initialize(arguments)
+
+    markdown_file_path, images_folder_name = arguments['upload']
+    git_path, markdown_file, image_path = parse_file_metadata(markdown_file_path, images_folder_name)
+    images = collect_images(image_path)
+    markdown_line_imagelink_keypair = extract_image_from_markdown(markdown_file_path)
+    image_abspaths_for_upload = process_needto_upload(image_path, markdown_line_imagelink_keypair)
+
+    do_dispatch(image_abspaths_for_upload, markdown_line_imagelink_keypair, git_path)
 
 
 if __name__ == '__main__':
-    st_time = time.perf_counter()
-    asyncio.run(main())
-    end_time = time.perf_counter() - st_time
-    print(end_time)
+    main()
