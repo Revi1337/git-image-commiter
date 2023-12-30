@@ -6,13 +6,12 @@ import argparse
 import re
 import os
 import base64
-from urllib.parse import unquote
-
+from urllib.parse import unquote, quote
 
 """
-v2. multi image commit
+v3. multi image commit
+    replace image-local-path to git-uploaded-link in markdown 
 """
-
 
 HEADERS = {}
 
@@ -23,9 +22,9 @@ GET_BRANCH_LAST_REF = 'https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_RE
 COMMIT_URL = 'https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPOSITORY}/git/commits'                               # post, body, token
 UPDATE_REF_URL = 'https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPOSITORY}/git/refs/heads/{GITHUB_BRANCH}'        # patch, body, token
 
-
 PATTERN_1 = r"!\[.{0,}\]\((.*?)\)"
 PATTERN_2 = r"!\[\[(.*?)\]\]"
+PATTERN_3 = r"!\[.{0,}\]\((.*?)\)|!\[\[(.*?)\]\]"
 
 
 def do_dispatch(image_abspaths_for_upload, markdown_line_imagelink_keypair, git_path):
@@ -38,7 +37,8 @@ async def create_blob(sess, image_abspaths_for_upload, git_path):
     blob_metadatas = build_blob_request_metadatas(image_abspaths_for_upload)
     async with aiohttp.ClientSession() as session:
         blob_responses = await asyncio.gather(
-            *[build_blob(session, blob_keypair) for blob_keypair in blob_metadatas.items()])
+            *[build_blob(session, blob_keypair) for blob_keypair in blob_metadatas.items()]
+        )
     create_tree(sess, blob_responses, git_path)
 
 
@@ -68,6 +68,7 @@ async def build_blob(sess, blob_keypair):
 def create_tree(sess, blob_responses, git_path):
     root_tree_sha_for_basetree = get_root_tree_sha(sess)
     body = build_tree_request_body(root_tree_sha_for_basetree, blob_responses, git_path)
+    # if body['tree']:
     create_tree_response = sess.post(url=CREATE_TREE_URL, data=json.dumps(body), headers=HEADERS).json()
     changed_tree_sha = create_tree_response['sha']
     do_commit(sess, changed_tree_sha)
@@ -136,7 +137,7 @@ def process_needto_upload(image_path, markdown_line_imagelink_keypair):
 def extract_image_from_markdown(markdown_file_path) -> dict[str, str]:
     wiki_link_list = {}
     with open(markdown_file_path, 'r', encoding='UTF-8') as file:
-        for line_number, line in enumerate(file, 1):
+        for line_number, line in enumerate(file, 0):
             if not line:
                 break
             line = line.strip('\n')
@@ -146,6 +147,8 @@ def extract_image_from_markdown(markdown_file_path) -> dict[str, str]:
                 if len(line) > len(line[st_inx : end_idx]):
                     continue
                 url_links = re.findall(PATTERN_1, line) or re.findall(PATTERN_2, line)
+                if url_links[-1].startswith("https://raw.githubusercontent.com"):
+                    continue
                 wiki_link_list[line_number] = url_links[-1]
     return wiki_link_list
 
@@ -182,6 +185,7 @@ def initialize(arguments):
     UPDATE_REF_URL = f'https://api.github.com/repos/{arguments["username"]}/{arguments["repo"]}/git/refs/heads/{arguments["branch"]}'
 
 
+
 def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--username', required=True, help='github username')
@@ -194,17 +198,58 @@ def parse_arguments():
 
 
 
+def guess_image_uploaded_address(arguments, git_path, markdown_line_imagelink_keypair):
+    local_remote_keypair = {}
+    for local_image in markdown_line_imagelink_keypair.values():
+        local_remote_keypair[local_image] = \
+            f'https://raw.githubusercontent.com/{arguments["username"]}/{arguments["repo"]}/{arguments["branch"]}/{git_path}/{local_image}'
+    return local_remote_keypair
+
+
+
+def replace_address_in_markdown(markdown_file_path, markdown_line_imagelink_keypair, local_remote_keypair):
+    markdown_contents = open(markdown_file_path, encoding='UTF-8').readlines()
+    with open(markdown_file_path, 'w+', encoding='UTF-8') as file:
+        for line in range(len(markdown_contents)):
+            if markdown_line_imagelink_keypair.get(line) is None:
+                file.writelines(markdown_contents[line])
+                continue
+            future_change_links = re.findall(PATTERN_3, markdown_contents[line])
+            if future_change_links:
+                pattern1_link, pattern2_link = future_change_links[-1]
+                if pattern1_link:
+                    changed_link = markdown_contents[line].replace(pattern1_link, local_remote_keypair[pattern1_link])
+                elif pattern2_link:
+                    remote_link = local_remote_keypair[pattern2_link]
+                    path, name = os.path.split(remote_link)
+                    changed_link = f'![]({path}/{quote(name)})\n'
+                else:
+                    raise RuntimeError("error occured while replacing links in markdown")
+
+            file.writelines(changed_link)
+
+
 def main():
+    # parse arguments and initialize web components
     arguments = parse_arguments()
     initialize(arguments)
 
+    # parse markdown file to extract metatdata information of images that need to be uploaded and commited to github
     markdown_file_path, images_folder_name = arguments['upload']
     git_path, markdown_file, image_path = parse_file_metadata(markdown_file_path, images_folder_name)
     images = collect_images(image_path)
     markdown_line_imagelink_keypair = extract_image_from_markdown(markdown_file_path)
     image_abspaths_for_upload = process_needto_upload(image_path, markdown_line_imagelink_keypair)
 
+    if not markdown_line_imagelink_keypair:
+        raise RuntimeError("no files to upload.")
+
+    # commit images to github
     do_dispatch(image_abspaths_for_upload, markdown_line_imagelink_keypair, git_path)
+
+    # replace the image linked in markdown with the path to the images uploaded to github
+    local_remote_keypair = guess_image_uploaded_address(arguments, git_path, markdown_line_imagelink_keypair)
+    replace_address_in_markdown(markdown_file_path, markdown_line_imagelink_keypair, local_remote_keypair)
 
 
 if __name__ == '__main__':
