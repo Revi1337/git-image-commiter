@@ -10,11 +10,12 @@ import sys
 from urllib.parse import unquote, quote
 
 """
-v6. multi image commit
+v7. multi image commit
     replace image-local-path to git-uploaded-link in markdown 
     remove collect_image func
     remove REGEX PATTERN 2, 3
-    add markdown relative path arguments 
+    add markdown relative path arguments
+    handling cant find image, no files to upload error 
 """
 
 HEADERS = {}
@@ -48,14 +49,18 @@ async def create_blob(sess, image_abspaths_for_upload, git_path):
 
 def build_blob_request_metadatas(image_abspaths_for_upload):
     metadatas = {}
-    for upload_image in image_abspaths_for_upload:
-        unquoted_image_path = unquote(upload_image)
-        with open(unquoted_image_path, 'rb') as image:
-            body = {
-                'content': base64.b64encode(image.read()).decode("utf8"),
-                'encoding': 'base64'
-            }
-            metadatas[unquoted_image_path] = body
+    try:
+        for upload_image in image_abspaths_for_upload:
+            unquoted_image_path = unquote(upload_image)
+            with open(unquoted_image_path, 'rb') as image:
+                body = {
+                    'content': base64.b64encode(image.read()).decode("utf8"),
+                    'encoding': 'base64'
+                }
+                metadatas[unquoted_image_path] = body
+    except FileNotFoundError as e:
+        print("Cant found --> " + unquoted_image_path + " <-- Images.")
+        sys.exit(1)
     return metadatas
 
 
@@ -220,6 +225,7 @@ def replace_address_in_markdown(markdown_file_path, markdown_line_imagelink_keyp
                     changed_link = markdown_contents[line].replace(pattern_link, local_remote_keypair[pure_link])
                 else:
                     raise RuntimeError("error occured while replacing links in markdown")
+
             file.writelines(changed_link)
 
 
@@ -235,7 +241,8 @@ def main():
     image_abspaths_for_upload = process_needto_upload(image_path, markdown_line_imagelink_keypair)
 
     if not markdown_line_imagelink_keypair:
-        raise RuntimeError("no files to upload.")
+        print("no files to upload")
+        sys.exit(1)
 
     # commit images to github
     do_dispatch(image_abspaths_for_upload, markdown_line_imagelink_keypair, git_path)
