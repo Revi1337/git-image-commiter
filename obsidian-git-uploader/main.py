@@ -11,6 +11,7 @@ from urllib.parse import unquote, quote
 """
 v3. multi image commit
     replace image-local-path to git-uploaded-link in markdown 
+    remove collect_image func
 """
 
 HEADERS = {}
@@ -25,6 +26,7 @@ UPDATE_REF_URL = 'https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPOSIT
 PATTERN_1 = r"!\[.{0,}\]\((.*?)\)"
 PATTERN_2 = r"!\[\[(.*?)\]\]"
 PATTERN_3 = r"!\[.{0,}\]\((.*?)\)|!\[\[(.*?)\]\]"
+
 
 
 def do_dispatch(image_abspaths_for_upload, markdown_line_imagelink_keypair, git_path):
@@ -128,9 +130,8 @@ def get_branch_last_ref(sess):
 
 
 def process_needto_upload(image_path, markdown_line_imagelink_keypair):
-    """ filter duplicate imagelink and build pure image links """
     image_links = set(markdown_line_imagelink_keypair.values())
-    return [os.path.join(image_path, image_link) for image_link in image_links]
+    return [os.path.join(image_path, os.path.basename(image_link)) for image_link in image_links]
 
 
 
@@ -149,13 +150,8 @@ def extract_image_from_markdown(markdown_file_path) -> dict[str, str]:
                 url_links = re.findall(PATTERN_1, line) or re.findall(PATTERN_2, line)
                 if url_links[-1].startswith("https://raw.githubusercontent.com"):
                     continue
-                wiki_link_list[line_number] = url_links[-1]
+                wiki_link_list[line_number] = os.path.basename(url_links[-1])
     return wiki_link_list
-
-
-
-def collect_images(image_path):
-    return [os.path.join(image_path, image_name) for image_name in os.listdir(image_path)]
 
 
 
@@ -218,9 +214,11 @@ def replace_address_in_markdown(markdown_file_path, markdown_line_imagelink_keyp
             if future_change_links:
                 pattern1_link, pattern2_link = future_change_links[-1]
                 if pattern1_link:
-                    changed_link = markdown_contents[line].replace(pattern1_link, local_remote_keypair[pattern1_link])
+                    pure_link = os.path.basename(pattern1_link)
+                    changed_link = markdown_contents[line].replace(pattern1_link, local_remote_keypair[pure_link])
                 elif pattern2_link:
-                    remote_link = local_remote_keypair[pattern2_link]
+                    pure_link = os.path.basename(pattern2_link)
+                    remote_link = local_remote_keypair[pure_link]
                     path, name = os.path.split(remote_link)
                     changed_link = f'![]({path}/{quote(name)})\n'
                 else:
@@ -237,7 +235,6 @@ def main():
     # parse markdown file to extract metatdata information of images that need to be uploaded and commited to github
     markdown_file_path, images_folder_name = arguments['upload']
     git_path, markdown_file, image_path = parse_file_metadata(markdown_file_path, images_folder_name)
-    images = collect_images(image_path)
     markdown_line_imagelink_keypair = extract_image_from_markdown(markdown_file_path)
     image_abspaths_for_upload = process_needto_upload(image_path, markdown_line_imagelink_keypair)
 
@@ -254,3 +251,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+
