@@ -6,12 +6,14 @@ import argparse
 import re
 import os
 import base64
+import sys
 from urllib.parse import unquote, quote
 
 """
-v3. multi image commit
+v5. multi image commit
     replace image-local-path to git-uploaded-link in markdown 
     remove collect_image func
+    remove REGEX PATTERN 2, 3
 """
 
 HEADERS = {}
@@ -24,8 +26,6 @@ COMMIT_URL = 'https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPOSITORY}
 UPDATE_REF_URL = 'https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPOSITORY}/git/refs/heads/{GITHUB_BRANCH}'        # patch, body, token
 
 PATTERN_1 = r"!\[.{0,}\]\((.*?)\)"
-PATTERN_2 = r"!\[\[(.*?)\]\]"
-PATTERN_3 = r"!\[.{0,}\]\((.*?)\)|!\[\[(.*?)\]\]"
 
 
 
@@ -70,7 +70,6 @@ async def build_blob(sess, blob_keypair):
 def create_tree(sess, blob_responses, git_path):
     root_tree_sha_for_basetree = get_root_tree_sha(sess)
     body = build_tree_request_body(root_tree_sha_for_basetree, blob_responses, git_path)
-    # if body['tree']:
     create_tree_response = sess.post(url=CREATE_TREE_URL, data=json.dumps(body), headers=HEADERS).json()
     changed_tree_sha = create_tree_response['sha']
     do_commit(sess, changed_tree_sha)
@@ -142,14 +141,12 @@ def extract_image_from_markdown(markdown_file_path) -> dict[str, str]:
             if not line:
                 break
             line = line.strip('\n')
-            match_regex = re.search(PATTERN_1, line) or re.search(PATTERN_2, line)
+            match_regex = re.search(PATTERN_1, line)
             if match_regex is not None:
                 st_inx, end_idx = match_regex.span()
                 if len(line) > len(line[st_inx : end_idx]):
                     continue
-                url_links = re.findall(PATTERN_1, line) or re.findall(PATTERN_2, line)
-                if url_links[-1].startswith("https://raw.githubusercontent.com"):
-                    continue
+                url_links = re.findall(PATTERN_1, line)
                 wiki_link_list[line_number] = os.path.basename(url_links[-1])
     return wiki_link_list
 
@@ -210,17 +207,12 @@ def replace_address_in_markdown(markdown_file_path, markdown_line_imagelink_keyp
             if markdown_line_imagelink_keypair.get(line) is None:
                 file.writelines(markdown_contents[line])
                 continue
-            future_change_links = re.findall(PATTERN_3, markdown_contents[line])
+            future_change_links = re.findall(PATTERN_1, markdown_contents[line])
             if future_change_links:
-                pattern1_link, pattern2_link = future_change_links[-1]
-                if pattern1_link:
-                    pure_link = os.path.basename(pattern1_link)
-                    changed_link = markdown_contents[line].replace(pattern1_link, local_remote_keypair[pure_link])
-                elif pattern2_link:
-                    pure_link = os.path.basename(pattern2_link)
-                    remote_link = local_remote_keypair[pure_link]
-                    path, name = os.path.split(remote_link)
-                    changed_link = f'![]({path}/{quote(name)})\n'
+                pattern_link = future_change_links[-1]
+                if pattern_link:
+                    pure_link = os.path.basename(pattern_link)
+                    changed_link = markdown_contents[line].replace(pattern_link, local_remote_keypair[pure_link])
                 else:
                     raise RuntimeError("error occured while replacing links in markdown")
 
@@ -251,6 +243,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
